@@ -24,13 +24,44 @@ const Promise = require('./promise')
  */
 
 
-// Promise.resolve(new Promise(resolve => {
-//   resolve(123)
-// })).then(r => {
-//   console.log(r)
-// })
+//  判断是否是一个 promise
+function isPromise(val) {
+  return val && (typeof val.then == 'function')
+}
+
+Promise.all = function(promises) {
+  return new Promise((resolve, reject) => {
+    let result = []
+    let times = 0
+    function processData(index, val) {
+      result[index] = val
+      if(++times === promises.length) {
+        resolve(result)
+      }
+    }
+
+    for(let i=0; i<promises.length; i++) {
+      let p = promises[i]
+      if(isPromise(p)) {
+        p.then(data => {
+          processData(i, data)
+        }, reject)
+      } else {
+        processData(i, p)   // 普通值
+      }
+    }
+  })
+}
 
 
-Promise.reject(1230).catch(e => {
-  console.log(e)
+const p1 = new Promise(resolve => {
+  resolve(111)
+})
+const p2 = new Promise(resolve => {
+  setTimeout(() => {
+    resolve(222)
+  }, 2000)
+})
+Promise.all([1, p1, p2]).then(r => {
+  console.log(r)
 })

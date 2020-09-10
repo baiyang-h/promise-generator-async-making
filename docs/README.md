@@ -551,47 +551,49 @@ class Promise {
 ```js
 then(onFulfilled, onRejected) {
 
-    let promise2 = new Promise((resolve, reject) => {
-      if(this.status === STATUS.FULFILLED) {
+  let promise2 = new Promise((resolve, reject) => {
+    if(this.status === STATUS.FULFILLED) {
+      try {
+        let x = onFulfilled(this.value)
+        resolve(x)
+      } catch(e) {
+        // 出错走失败逻辑
+        reject(e)
+      }
+    }
+    if(this.status === STATUS.REJECTED) {
+      try {
+        let x = onRejected(this.reason)
+        resolve(x)
+      } catch(e) {
+        reject(e)
+      }
+    }
+    if(this.status === STATUS.PENDING) {
+      // 装饰模式 切片编程
+      this.onResolvedCallbacks.push(() => {   // todo..
         try {
           let x = onFulfilled(this.value)
           resolve(x)
         } catch(e) {
-          // 出错走失败逻辑
           reject(e)
         }
-      }
-      if(this.status === STATUS.REJECTED) {
+      })
+      this.onRejectedCallbacks.push(() => {   // todo..
         try {
           let x = onRejected(this.reason)
           resolve(x)
         } catch(e) {
           reject(e)
         }
-      }
-      if(this.status === STATUS.PENDING) {
-        // 装饰模式 切片编程
-        this.onResolvedCallbacks.push(() => {   // todo..
-          try {
-            let x = onFulfilled(this.value)
-            resolve(x)
-          } catch(e) {
-            reject(e)
-          }
-        })
-        this.onRejectedCallbacks.push(() => {   // todo..
-          try {
-            let x = onRejected(this.reason)
-            resolve(x)
-          } catch(e) {
-            reject(e)
-          }
-        })
-      }
-    })
-    return promise2
+      })
+    }
+  })
+  return promise2
 
-  }
+}
+
+
 ```
 
 但是现在我们要考虑一件事，如果`let x = onRejected(this.reason)`得到的值还是一个 Promise 实例，该怎么办呢？此时我们定义一个方法，来做一些处理并进行递归操作。
@@ -652,5 +654,395 @@ then(onFulfilled, onRejected) {
   }
 ```
 
+现在让我们来看下 `onFulfilled` 或者 `onRejected` 方法执行的返回结果，可能这个结果还是一个 promise 或者 是本身等情况时的操作，现在我们申明一个 `resolvePromise` 函数，来对此做一些处理。
 
+```js
+// 这里也有相应的 Promise A+ 规范
+function resolvePromise(x, promise2, resolve, reject) {
+  if (promise2 === x) { // 如果是自己的话，自己调自己会死循环
+    return reject(new TypeError('出错了'))
+  }
+  // 看 x 是普通值还是 promsie，如果是 promise 要采用他的状态
+  if ((typeof x === 'object' && x !== null) || typeof x === 'function') {
+    /*
+    p.then(r => {
+      return new Promise((resolve, reject) => {
+        reject(100)
+        resolve
+        throw new Eroor()
+        // 所以这3种状态都要增加开关
+      })
+    })
+    */
+   // 为了上面这种情况 不会在一个 Promsie 中 同时调用 resolve 和 reject 都有效，内部状态改变了就不能变了，增加 called 这个开关
+  //  这里的reject和 resolve 参数是then方法内部 隐藏创建的那个新的 promise 的
+    let called   
+    try {
+      // x可以使一个对象或者函数
+      let then = x.then; // 就看一下这个对象是否有 then 方法
+      if (typeof then === 'function') {
+        // then 是函数 我就认为这个x是一个promise
+        //  如果x是promise 那么久采用他的状态
+        // 为什么要用这种方式执行呢，为了确保then的唯一性，就是上面定义的那个，因为如果重新取的话，可能别人的会修改，如Object.defineProperty 修改
+        then.call(x, function(y) {   // 调用返回的promise，用他的结果 作为下一次then的结果
+          if(called) return
+          called = true
+          resolvePromise(y, promise2, resolve, reject)   // 递归调用
+        }, function(r) {  
+          if(called) return
+          called = true
+          reject(r)
+        })
+      } else {
+        resolve(x) // 此时x 就是一个普通对象
+      }
+    } catch (e) {
+      if(called) return
+      called = true
+      reject(e)   // 取then时抛出错误
+    }
+  } else {
+    resolve(x) // x 是一个原始数据类型， 不是promise
+  }
+
+  // 不是 promise 直接就调用 resolve
+
+}
+```
+
+首先对返回的值进行判断是否是自己本身，如果是自己本身的话就抛出错误，因为如果是自己本身会导致死循环递归
+
+```js
+if (promise2 === x) { // 如果是自己的话，自己调自己会死循环
+  return reject(new TypeError('出错了'))
+}
+```
+
+然后我们再进一步的判断是否是一个对象或者是一个函数,如果不是，则表示 x 是一个原始类型，不是 promise，则直接 `resolve(x)`
+
+```js
+if ((typeof x === 'object' && x !== null) || typeof x === 'function') {
+ ......
+} else {
+  resolve(x)
+}
+```
+
+ok,我们继续执行下面的步骤，如果 `x.then` 是一个函数的话，那么可以确定这是一个 promise 对象（其实还可以更严格），我们先将 x 对象中的 `then`方法保留起来，便于下面 `then.call(x, ()=>{}, ()=> {})` 调用，那么这里为什么要这样执行 `then` 方法，而不`x.then(()=>{}, ()=>{})` 这样执行呢？为的是避免重新进行取 `then` 这个值，确保就是一开始那个 then，唯一性，因为可能别人的 promise 会将自己写的then 方法修改，如 `Object.defineProperty(promsie.prototype, 'then', {})`等，所以这里确保其唯一性，使用 `call` 方法。
+
+同时如果 `promise.then` 执行后返回的不是一个promsie 实例，那么就是一个普通对象，则直接 `resolve(x)`，如果返回的是一个 promise，那该怎么办？所以我们在内部进行递归调用 `resolvePromise` 直到不是 promsie，取到最终值，而这个函数接受4个参数，第一个为 `then` 方法的参数，即函数返回的结果。第二个参数是最开始 `then` 方法返回的那个 promise2，第三个参数是该promise2中的  `resolve`，第四个参数是 promise2中的  `reject`。
+
+```js
+let called   
+try {
+  let then = x.then; // 就看一下这个对象是否有 then 方法
+  if (typeof then === 'function') {
+		// 调用返回的promise，用他的结果 作为下一次then的结果
+    then.call(x, function(y) {   // 成功的回调
+      if(called) return
+      called = true
+      resolvePromise(y, promise2, resolve, reject)   // 递归调用
+    }, function(r) {     // 失败的回调
+      if(called) return
+      called = true
+      reject(r)
+    })
+  } else {
+    resolve(x) // 此时x 就是一个普通对象
+  }
+} catch (e) {
+  if(called) return
+  called = true
+  reject(e)   // 取then时抛出错误
+}
+```
+
+其中对于 `try catch`，如果我们捕获到异常的话，就要`reject(e)`。这里我们增加了一个 `called` 开关，主要是针对以下场景，其中 then 中返回的是Promise的情况时，内部还同时执行改变了多次状态，这是不被允许的，所以增加一个开关，当状态改变后，就不能再被触发调用这两个回调了
+
+```js
+p.then(r => {
+  return new Promise((resolve, reject) => {
+    reject(100)
+    resolve
+    throw new Eroor()
+    // 所以这3种状态都要增加开关
+  })
+})
+```
+
+最终我们执行以下代码，会返回promise时递归执行，输出最后的状态结果
+
+```js
+let p = new Promise((resolve, reject) => {
+  setTimeout(() =>{
+    resolve(111)
+  }, 1000)
+}).then(r => {
+  // throw new Error('err')
+  // return 100
+  
+  return new Promise((resolve, reject) => {
+    resolve(222)
+  }).then(r => {
+    return new Promise((resolve, reject) => {
+      resolve(3333333)
+    })
+    
+    /*
+    return new Promise((resolve, reject) => {
+    	resolve(new Promise(xxx))
+  	})
+    */
+    
+    
+  }, e => {})
+}).then(r => {
+  console.log(r)     // 等待 输出 3333333
+}, err => {
+  console.log(err)
+})
+```
+
+现在接着处理下一种情况，`then` 中不传入回调函数，会直接跳过，一直往下，直到找到最近可调用的回调函数位置
+
+```js
+const p = new Promise((resolve, reject) => {
+  resolve('ok')
+})
+.then()
+.then()
+.then()
+.then(r => {   // 跳过一个个then，直到此次才执行
+  console.log(r)
+})
+
+// 可以把他理解成，其实内部就是如下执行的
+const p = new Promise((resolve, reject) => {
+  resolve('ok')
+})
+.then(r => {
+  return r
+})
+.then(r => {
+  return r
+})
+.then(r => {
+  return r
+})
+.then(r => {   // 跳过一个个then，直到此次才执行
+  console.log(r)
+})
+```
+
+此时只要在 `then` 方法中写上以下两句话就可以了：
+
+```js
+then() {
+  onFulfilled = typeof onFulfilled === 'function' ? onFulfilled : data => data
+	onRejected = typeof onRejected === 'function' ? onRejected : err => {throw err}
+  ......
+}
+```
+
+加上以上两句话后，我们就可以再定义 `catch` 方法了
+
+```js
+catch(err) {  // 默认没有成功  只有失败
+  return this.then(null, err)
+}
+```
+
+
+
+## Promise 测试
+
+测试时调用一个插件来查看自己编写的 promise 是否符合规范，首先增加上一个 defer 方法
+
+```js
+Promise.defer = Promise.deferred = function() {
+  let dfd = {}
+  dfd.promise = new Promise((resolve, reject) => {
+    dfd.resolve = resolve;
+    dfd.reject = reject
+  })
+  return dfd
+}
+```
+
+```bash
+npm install promises-aplus-tests -g --force
+```
+
+执行
+
+```bash
+promises-aplus-tests promise.js  
+```
+
+
+
+## Promsie.resolve
+
+```js
+// Promise.resolve 可以等待一个 promise 执行完毕
+Promise.resolve('123').then(r => {
+  console.log(r)
+})
+
+Promise.resolve(new Promise(resolve =< {
+  resolve('123')
+})).then(r => {
+  console.log(r)
+})
+```
+
+这是一个静态方法，现在我们来写这个方法，他也直接返回一个 promise
+
+```js
+static resolve(val) {
+  return new Promise((resolve, reject) => {
+    resolve(val)
+  })
+}
+```
+
+但是现在我们要考虑到如果传入的参数val也是一个promise，那该怎么办？我们需要在 resolve 方法中加上对传入参数是否是 promise 的判断，如果传入的参数还是 promsie，那么当该promise的状态改变时，如 `resolve('123')`，因为没有异步，所以会执行他的 `then`方法，而又因为该 promsie 的 `then` 方法第一个参数是 一开始传入的 `resolve`，所以 执行时会将`this.value` 为 '123'传入，所以  `Promise((resolve, reject) => { resolve(val) })` 这个的状态改变了
+
+```js
+const resolve = val => {
+  ......
+  if(val instanceof Promise) {    // 是promise 就继续递归解析
+    return val.then(resolve, reject)
+  }
+}
+```
+
+
+
+## Promise.reject
+
+```js
+Promise.reject(p).catch(err => {
+  console.log(err)
+})
+```
+
+
+
+```js
+static reject(reason) {    // 失败的 promise
+  return new Promise((resolve, reject) => {
+    reject(reason)
+  })
+}
+```
+
+
+
+## Promise.all
+
+```js
+const p1 = new Promise(resolve => {
+  resolve(111)
+})
+const p2 = new Promise(resolve => {
+  setTimeout(() => {
+    resolve(222)
+  }, 2000)
+})
+Promise.all([1, p1, p2]).then(r => {
+  console.log(r)
+})
+```
+
+我们先贴出源码部分，然后来进行说明
+
+```js
+//  判断是否是一个 promise
+function isPromise(val) {
+  return val && (typeof val.then == 'function')
+}
+
+Promise.all = function(promises) {
+  return new Promise((resolve, reject) => {
+    let result = []
+    let times = 0
+    function processData(index, val) {
+      result[index] = val
+      if(++times === promises.length) {
+        resolve(result)
+      }
+    }
+
+    for(let i=0; i<promises.length; i++) {
+      let p = promises[i]
+      if(isPromise(p)) {
+        p.then(data => {
+          processData(i, data)
+        }, reject)
+      } else {
+        processData(i, p)   // 普通值
+      }
+    }
+  })
+}
+```
+
+首先 `Promsie.all` 是一个静态方法，
+
+1. 他也是返回一个 promise 对象，传入的参数是一个数组。
+2. 实例的 then 方法中的第一个函数的参数可以获取到 `Promise.all` 中传入的所有值
+3. 要等待所有`Promise.all`中的任务全部完成才改变状态，才能获取最终所有值
+4. 只要其中一个任务出错，就reject了
+
+`promises` 就是 `Promise.all` 中传入的数组，我们暂时把他称为任务，`result`存储的就是每个任务的值（不是promise就直接是本身，是promise就取它的resolve的值），用于执行完所有任务后返回的`then(r => r)`这个`r`，他是一个数组。
+
+`times` 是一个计数器，只有计数器 === promises 的长度时，才表示所有任务都执行好了，才会改变promise的状态。
+
+先来看这个for循环
+
+```js
+for(let i=0; i<promises.length; i++) {
+  let p = promises[i]
+  if(isPromise(p)) {
+    p.then(data => {
+      processData(i, data)
+    }, reject)
+  } else {
+    processData(i, p)   // 普通值
+  }
+}
+```
+
+如果任务不是promise的话，则直接传入他本身这个值，如果是一		个promise对象，则调用他的then方法，得到值之后传入
+
+`processData` 函数。
+
+现在我们来讲一下 `processData` 函数，这个函数用于将值都保存到一个数组中，并且增加一个判断，只有当所有任务执行好之后才执行 `resolve`。
+
+```js
+// 方案1  xxxx 错误
+function processData(index, val) {
+  result[index] = val
+  if(result.length === promises.length) {
+    resolve(result)
+  }
+}
+
+// 方案2
+function processData(index, val) {
+  result[index] = val
+  if(++times === promises.length) {
+    resolve(result)
+  }
+}
+```
+
+为什么我们不使用方案1呢？如果`Promise.all([p1, p2, 1])`  因为微任务的原因，前面两个会后执行，先操作 `1`，这会导致 `result[index] = val`, 直接index 就是2， `result.length` 长度直接是3了，直接会 `resolve` 了，这是不正确的，所以我们使用完成一个任务就加一的形式，知道和任务数相匹配，才执行 `resolve`
+
+
+
+## Promise.finally
+
+`Promsie.finally`这个方法，不管怎么样都会调用
 

@@ -1044,5 +1044,259 @@ function processData(index, val) {
 
 ## Promise.finally
 
-`Promsie.finally`这个方法，不管怎么样都会调用
+`Promsie.finally`这个方法，不管怎么样都会调用。
+
+1. `finally`中的函数 不接收参数，所以上面的值不会传递下拉，
+2. `finally`返回的也是一个 promise 实例，并且它的状态是上面最近一个的状态。如果`finally`后面还有`then`方法，那么会将 `finally`上一个的 promise 引用下去
+3. 不过，如果 `finally`中返回一个 `reject`的 promise 的话，那么会被后面的`catch`捕获，可以进行往下的传递。
+
+
+
+`finally` 中 `return` 一个 promsie， 除非是 `reject` 的，不然是不会影响下一个 `then` 的，下一个`then` 还是根据 `finally` 之前的状态决定。 除非 `finally` 中 `reject`
+
+```js
+Promise.resolve(1)
+.finally(() => {   // 这里传入的函数， 无论如何都会执行
+  console.log('finally')
+
+  return new Promise((resolve, reject) => {
+    setTimeout(() => {
+      resolve('ok')
+    }, 2000)
+  })
+})
+.then(r => {
+  console.log('s', r)      // Promise.resolve(1) 不受 finally   看finally 之前的 promise
+})
+.catch(e => {
+  console.log('e', e)
+})
+
+// finally
+// s 1
+```
+
+
+
+```js
+Promise.reject(1)
+.finally(() => {   // 这里传入的函数， 无论如何都会执行
+  console.log('finally')
+
+  return new Promise((resolve, reject) => {
+    setTimeout(() => {
+      resolve('ok')
+    }, 2000)
+  })
+})
+.then(r => {
+  console.log('s', r)   
+})
+.catch(e => {
+  console.log('e', e)    // Promise.reject(1)   不受 finally  看finally 之前的 promise
+})
+
+// finally
+// e 1
+```
+
+
+
+```js
+Promise.resolve(1)
+.finally(() => {   // 这里传入的函数， 无论如何都会执行
+  console.log('finally')
+
+  return new Promise((resolve, reject) => {
+    setTimeout(() => {
+      reject('ok')       // ！！！  返现 finally 返回一个 promise， 并且状态改为 reject！！，， 所以会进行向下传递
+    }, 2000)
+  })
+})
+.then(r => {
+  console.log('s', r)   
+})
+.catch(e => {
+  console.log('e', e)        // reject('ok') 
+})
+
+// finally
+// e ok
+```
+
+我们来写一下他的源码部分
+
+```js
+Promise.prototype.finally = function(callback) {
+  return this.then((data) => {
+      // 让函数执行 内部会调用方法，如果方法是promise需要等待他完成
+      return Promise.resolve(callback()).then(() => data)
+  }, err => {
+      return Promise.resolve(callback()).then(() => { throw err })
+  })
+}
+```
+
+
+
+## promisify和promisifyAll
+
+有时候我们想将一个函数转成 promise 的形式，那么我们可以自定义一个 `promisify` 函数
+
+```js
+const fs = require('fs')
+
+// 将 node 的方法 转化为 promise形式
+function promisify(fn) {   // 高阶函数
+  return function(...args) {
+    return new Promise((resolve, reject) => {
+      fn(...args, function(err, data) {
+        if(err) return reject(err)
+        resolve(data)
+      })
+    })
+  }
+}
+
+const readFile = promisify(fs.readFile)     // 怎么将node的api 转化成 promise api
+readFile('./package.json', 'utf8').then(data => {
+  console.log(data)
+})
+```
+
+也可以创建一个 `promisifyAll` 函数，用于将所有的模块内的方法转为 promise 形式，如 fs 模块
+
+```js
+// 比如将 fs 中的所有方法转为 promise 形式
+function promisifyAll(target) {
+  Reflect.ownKeys(target).forEach(key => {
+    target[key+'Async'] = promisify(target[key])
+  }) 
+  return target
+}
+
+let obj = promisifyAll(fs)
+obj.readFileAsync('./package.json', 'utf8').then(data => {
+  console.log(data)
+})
+```
+
+不过现在node 已经内置有 `promisify` 方法了，在`util`中内置了，   `util.promisify`。同时我们也可以直接 `require('fs/promises')`  转为 promise 形式
+
+```js
+const fs = require('fs/promises');
+
+(async function(path) {
+  try {
+    await fs.unlink(path);
+    console.log(`已成功地删除文件 ${path}`);
+  } catch (error) {
+    console.error('出错：', error.message);
+  }
+})('文件');
+
+// 或 内置util 工具库 
+util.promisify(doSomething);
+```
+
+
+
+## Promise.race
+
+注意 当改变状态后就不会在改变了，所以可以下面这样直接写，谁先改变就是结果
+
+```js
+Promise.race = function(promises) {
+  return new Promise((resolve, reject) => {
+    for(let i=0; i<promises.length; i++) {
+      let currentVal = promises[i]
+      if(currentVal && currentVal.then == 'function') {
+        currentVal.then(resolve, reject)
+      } else {
+        resolve(currentVal)
+      }
+    }
+  })
+}
+
+let p1 = new Promise((resolve, reject) => {
+  setTimeout(() => {
+    resolve(111)
+  }, 1000)
+})
+
+let p2 = new Promise((resolve, reject) => {
+  setTimeout(() => {
+    reject(111)
+  }, 2000)
+})
+
+Promise.race([1, p1, p2]).then(r => {
+  console.log(r)
+}).catch(e => {
+  console.log(e)
+})
+```
+
+
+
+## 中断promise
+
+我们自定义一个 `promise.abort` 来表示中断当前在进行中的 promise，只要还没改变状态前都能中断
+
+```js
+// abort 方法就是  不要 promise 这次成功的结果了,, 即中断，
+
+// 超时处理
+
+let p1 = new Promise((resolve, reject) => {
+  setTimeout(() => {
+    resolve('成功了')
+  }, 3000)
+})
+
+// 做一个包装，在这个包装函数中，新创建一个 promise。在该实例上定义一个 abort 中断方法
+function wrap(p1) {   // p1 是用户的， 我在内部在构建一个 promise 和 用户传入的组成一队
+  let abort
+  let p2 = new Promise((resolve, reject) => {
+    abort = reject
+  })
+  // 谁先触发
+  let newP = Promise.race([p1, p2])    // 如果 p2 失败了就马上失败了
+  newP.abort = abort
+  return newP
+}
+
+
+let p2 = wrap(p1)   // 包装一下
+p2.then(r => {
+  console.log(r)
+}).catch(e => {
+  console.log(e)
+})
+
+
+setTimeout(() => {
+  // 如果超过两面就让这个promise失败掉
+  p2.abort('错误信息')  // 中断。 其实就是执行 reject
+}, 2000)
+```
+
+其主要原理就是声明一个变量，将 `resolve` 或者 `reject` 传入到这个变量中，等到在想要触发的时刻，手动触发
+
+```js
+/*
+其实就是下面这个意思，将 reject 赋值给一个变量，等要在调用的地方，调用这个变量，那么 promise 的 pendding 状态就改变了
+因为 new Promise()  不调用resolve 或 reject 的话，一直是 pendding 状态
+*/
+
+let a
+let p = new Promise((reslove, reject) => {
+  a = reject
+})
+// 3秒后， p 状态变为 reject
+setTimeout(() => {
+  a()  
+}, 3000)
+```
 

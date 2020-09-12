@@ -1300,3 +1300,8 @@ setTimeout(() => {
 }, 3000)
 ```
 
+
+
+# Generator
+
+111

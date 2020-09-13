@@ -1,6 +1,6 @@
 module.exports = {
-  title: 'Promise',
-  description: '手写Promise',
+  title: 'Promise+Generator+async',
+  description: 'Promise+Generator+async 原理',
   themeConfig: {
     sidebar: [
       {
